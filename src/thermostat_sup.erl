@@ -8,7 +8,7 @@ start_link() ->
 init([]) ->
     {ok,
      {{one_for_one, 5, 5},
-      [serv_worker(thermostat_control, {spawner, fun thermostat:start/0})]}}.
+      [serv_worker(thermostat, {spawner, fun thermostat:start/0})]}}.
 
 
 %% Default record for permanent task.
