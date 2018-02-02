@@ -1,5 +1,7 @@
 -module(thermostat).
--export([start/0, handle/2]).
+-export([start/0,
+         %% Internal
+         handle/2, ping/1]).
 
 start() ->
     serv:start(
@@ -10,10 +12,15 @@ start() ->
                #{
                   dev => 24, %% broom
                   socket => Socket, 
-                  ping => serv:start({periodic, 60000, fun() -> Pid ! ping end})
+                  ping => serv:start({body, fun() -> thermostat:ping(Pid) end})
                 }
        end, 
        fun thermostat:handle/2}).
+
+ping(Pid) ->
+    timer:sleep(60000),
+    ok = obj:call(Pid, ping),
+    thermostat:ping(Pid).
 
 timestamp() ->
     erlang:monotonic_time(second).
@@ -32,13 +39,25 @@ handle({udp, Socket, {10,1,3,From}, _,
 handle({udp, _, _, _, _}=Msg, State) ->
     io:format("ignoring: ~p~n",[Msg]), State;
 
-handle(ping, State = #{ dev := Dev }) ->
+handle({Pid,ping}, State = #{ dev := Dev }) ->
+    obj:reply(Pid,ok),
     Now = timestamp(),
-    case maps:find({dev, Dev}, State) of
-        {ok, {Time, _Temp}} ->
-            io:format("ping: dT = ~p~n", [Now - Time]);
-        _ ->
-            io:format("ping: ~p not active~n", [Dev])
+    Check =
+        case maps:find({dev, Dev}, State) of
+            {ok, {Time, _Temp}} ->
+                DT = Now - Time,
+                case DT > 60 of 
+                    false -> ok;
+                    true -> {error, {dt, DT}}
+                end;
+            _ ->
+                {error, not_active}
+        end,
+    case Check of
+        ok -> ok;
+        {error, _}=E ->
+            io:format("ping: ~p~n",[{Dev,E}]),
+            shutdown_FIXME
     end,
     State;
 
