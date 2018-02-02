@@ -1,0 +1,15 @@
+{application, thermostat,
+ [{description, "Thermostat"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, [thermostat]},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
