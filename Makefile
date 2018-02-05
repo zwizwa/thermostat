@@ -10,3 +10,5 @@ mrproper:
 	rm -rf rebar.lock  _build
 clean:
 	rm -f rebar.lock `find _build -name *.beam`
+dialyzer: $(REBAR)
+	$(REBAR) dialyzer

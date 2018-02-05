@@ -9,6 +9,14 @@
 %% Calibration: keep the devices associated to IP addresses, and
 %% always log non-calibrated values.
 
+-type state() :: 
+        #{ target := {atom(), number()},
+           spread := number(),
+           socket := port(),
+           log    := pid(),
+           ping   := pid() }.
+                    
+
 start() ->
     serv:start(
       {handler,
@@ -41,6 +49,7 @@ ping(Pid) ->
     ok = obj:call(Pid, ping),
     thermostat:ping(Pid).
 
+-spec timestamp() -> integer().
 timestamp() ->
     erlang:monotonic_time(second).
 
@@ -48,7 +57,7 @@ timestamp() ->
 handle({udp, Socket, {10,1,3,ID}, _, 
         <<255,255,                  %% Magic
           DAC:16/little-signed>>},  %% 8.8 fixed point celcius
-       #{socket := Socket} = State) ->
+       #{socket := Socket} = State) when is_number(ID) ->
 
     case maps:find(ID, network()) of
         error ->
@@ -141,10 +150,12 @@ handle({Pid,report},State = #{target := {Current, Setpoint}}) ->
 
 handle(Msg,State) ->
     obj:handle(Msg,State).
-    
+
+-spec c2f(number()) -> number().    
 c2f(T) -> T*1.8+32.
 
 %% Regulator update
+-spec update(number(), on|off, state()) -> state().
 update(T, on=Old,
        #{ spread := Spread,
           target := {_Current, Setpoint}} = State) ->
@@ -186,6 +197,7 @@ log(#{log := File}, Term) ->
 
 
 %% hostno -> {host, calib, desc}.
+-spec network() -> #{ number() => {atom(), binary()} }.
 network() -> 
     #{
        19 => {groom,      <<"Guest Room">>},  %% zora on docking station
@@ -198,6 +210,7 @@ network() ->
      }.
 
 %% ICE point DAC values
+-spec icepoint() -> #{ atom() => integer() }.
 icepoint() -> #{
           zoo        => 592, 
           lroom      => 192,
