@@ -220,36 +220,3 @@ icepoint() -> #{
           groom      => 944,
           beaglebone => 336
       }.
-
-      
-%% calib() ->
-%%     %% Honeywell thermostat as reference.
-%%     %% Host => [{Ref,Temp}].
-%%     %% Data collected as farenheit.
-%%     %% Identified by hostname.
-    
-%%     CalF = #{
-%%       18 => [{56,62.7},{56,62.8},{59,66.3},{62,68.7}],
-%%       24 => [{56,58.1},{56,58.5},{59,62.9},{62,65.0}],
-%%       97 => [{56,60.1},{56,60.6},{59,62.2},{62,65.9}],
-%%       23 => [{56,58.0},{56,58.7},{59,62.0},{62,63.8}],
-%%       12 => [{56,60.8},{56,61.2},{59,64.1},{62,66.3}],
-%%       2  => [{56,59.8},{56,60.1},{59,63.6},{62,65.6}],
-%%       19 => [{59,67.6},{62,69.2}]  %% far off, possibly bad data, was broken slot7
-%%      },
-%%     maps:map(
-%%       fun(_Name, TableF) ->
-%%               %% [{Ref,Temp}] -> Avg
-%%               SumDiffF = lists:foldl(
-%%                            fun({RefF,TempF},Acc) -> Acc + RefF - TempF end,
-%%                            0, TableF),
-%%               CorrF = SumDiffF / length(TableF),
-%%               CorrC = CorrF / 1.8,
-%%               %% Same resolution as sensor.
-%%               round(CorrC,16)
-%%       end,
-%%       CalF).
-
-%% round(C,N) -> round(C * N) / N.
-        
-
