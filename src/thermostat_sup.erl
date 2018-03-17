@@ -3,7 +3,21 @@
 -export([start_link/0, init/1, serv_start_registered/2]).
 
 start_link() ->
+    start_cowboy(),
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+start_cowboy() ->
+    Dispatch = cowboy_router:compile(
+                 [{'_', [{"/static/[...]", cowboy_static, {priv_dir, thermostat, "static"}}
+                        ,{"/ws",           ws, []   }      %% Websocket
+                        ,{"/[...]",        ui_thermostat, []}  %% Catch-all dispatcher
+                        ]}]),
+    NbAcceptors = 1, %% Not performance-criticial
+    _ = cowboy:start_http(http, NbAcceptors, [{port, 80}],
+                          [{env, [{dispatch, Dispatch}]}]),
+    %% Pid is never needed, so don't propagate.
+    ok.
+    
 
 init([]) ->
     {ok,
