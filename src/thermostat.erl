@@ -4,7 +4,7 @@
          set_furnace_state/1,
          get_furnace_state/0,
          %% Internal late binding
-         handle/2, ping/1]).
+         handle/2, ping/1, snapshot/1]).
 
 %% Calibration: keep the devices associated to IP addresses, and
 %% always log non-calibrated values.
@@ -26,12 +26,13 @@ start() ->
                {ok, Log} = file:open("/var/log/thermostat", [append, delayed_write]),
                State = #{
                  %% Controller Config
-                 target => {lroom, 17.0},
+                 target => {lroom, undefined},
                  spread => 0.5,
                  
                  %% Infrastructure
                  socket => Socket, 
                  log => Log,
+                 bc => serv:bc_start(),
                  ping => serv:start({body, fun() -> thermostat:ping(Pid) end})
                 },
                log(State, {start, calendar:local_time()}),
@@ -76,7 +77,20 @@ handle({udp, Socket, {10,1,3,ID}, _,
 handle({udp, _, _, _, _}=Msg, State) ->
     io:format("ignoring: ~p~n",[Msg]), State;
 
-%% Generic temperature input.
+%% Measurement input with setpoint inactive: pick the first
+%% measurement, so no action is taken at startup.
+handle({temp, Name, Temp},
+       State = #{target := {Current, undefined}}) ->
+    case Name of
+        Current ->
+            NewTarget = {Current, Temp},
+            io:format("target: ~p~n", [NewTarget]),
+            maps:put(target, NewTarget, State);
+        _ ->
+            State
+    end;
+
+%% Measurement input with setpoint active.
 handle({temp, Name, Temp},
        State = #{target := {Current, _Setpoint}}) ->
 
@@ -131,28 +145,45 @@ handle({set_spread,Spread}=Msg, State) ->
     maps:merge(State,
                #{ spread => Spread });
 
-handle({Pid,report},State = #{target := {Current, Setpoint}}) ->
-    Descs = maps:from_list(maps:values(network())),
-    Temps =
-        lists:append(
-          lists:map(
-            fun({{dev,Name},{_,T}}) ->
-                    Desc = maps:get(Name,Descs,<<"unknown">>),
-                    [{Name,Desc,T,c2f(T)}];
-               (_) -> []
-            end,
-            maps:to_list(State))),
-    obj:reply(Pid, 
-              #{ target  => {Current,Setpoint,c2f(Setpoint)},
-                 furnace => get_furnace_state(),
-                 temps   => Temps }),
+%% handle({Pid,report},State = #{target := {Current, Setpoint}}) ->
+%%     Descs = maps:from_list(maps:values(network())),
+%%     Temps =
+%%         lists:append(
+%%           lists:map(
+%%             fun({{dev,Name},{_,T}}) ->
+%%                     Desc = maps:get(Name,Descs,<<"unknown">>),
+%%                     [{Name,Desc,T,c2f(T)}];
+%%                (_) -> []
+%%             end,
+%%             maps:to_list(State))),
+%%     obj:reply(Pid, 
+%%               #{ target  => {Current,Setpoint,c2f(Setpoint)},
+%%                  furnace => get_furnace_state(),
+%%                  temps   => Temps }),
+%%     State;
+
+handle({Pid,snapshot},State) ->
+    %% Remove internal bits.
+    Snapshot =
+        maps:merge(
+          %% Remove internal bits
+          lists:foldl(
+            fun(F,S) -> F(S) end, State,
+            [fun(M) -> maps:remove(K,M) end || K <- [socket, ping, log]]),
+          %% This has to run on the actuator host, which is the main
+          %% reason why snapshot is implemented as rpc method.
+          #{ furnace => get_furnace_state() }),
+
+    %% Record furnace state
+    obj:reply(Pid, Snapshot),
     State;
+
 
 handle(Msg,State) ->
     obj:handle(Msg,State).
 
--spec c2f(number()) -> number().    
-c2f(T) -> T*1.8+32.
+%% -spec c2f(number()) -> number().    
+%% c2f(T) -> T*1.8+32.
 
 %% Regulator update
 -spec update(number(), on|off, state()) -> state().
@@ -192,8 +223,14 @@ get_furnace_state() ->
 set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
 set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").
 
-log(#{log := File}, Term) ->
+log(#{log := File, bc := BC}, Term) ->
+    BC ! {broadcast, {thermostat, Term }},
     file:write(File, io_lib:format("~p~n",[{timestamp(),Term}])).
+
+
+%% User access
+snapshot(Pid) ->
+    obj:call(Pid, snapshot).
 
 
 %% hostno -> {host, calib, desc}.
@@ -201,7 +238,8 @@ log(#{log := File}, Term) ->
 network() -> 
     #{
        19 => {groom,      <<"Guest Room">>},  %% zora on docking station
-       18 => {garage,     <<"Garage">>},      %% pi3
+    %% 18 => {garage,     <<"Garage">>},      %% pi3
+       45 => {garage,     <<"Garage">>},      %% jacoba
        2  => {zoo,        <<"Dining Room">>},
        12 => {zoe,        <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
