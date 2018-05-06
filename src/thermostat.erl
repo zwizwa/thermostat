@@ -216,9 +216,9 @@ transition(State, T, Old, New) ->
 
 %% Always use actual pin state.  Don't duplicate states.
 get_furnace_state() ->
-    case os:cmd("/usr/local/bin/furnace.sh value") of
-        "1\n" -> off;
-        "0\n" -> on
+    case os:cmd("/usr/local/bin/furnace.sh state") of
+        "off\n" -> off;
+        "on\n" -> on
     end.
 set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
 set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").

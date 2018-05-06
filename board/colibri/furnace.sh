@@ -12,7 +12,7 @@ init() {
 	for relay in 1 2 3 4; do
 		echo low >/tmp/relay/$relay/direction
 	done
-	chown tom:tom /sys/class/gpio/gpio89
+        chown tom:tom /tmp/relay/1/value
 }
 
 FURNACE=/tmp/relay/1/value

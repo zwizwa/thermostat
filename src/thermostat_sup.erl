@@ -5,6 +5,7 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+%% Start only when local GPIO driver script is present.
 init([]) ->
     case filelib:is_file("/usr/local/bin/furnace.sh") of
         true ->
