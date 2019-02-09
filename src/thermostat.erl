@@ -3,7 +3,9 @@
          network/0, icepoint/0,
          set_furnace_state/1,
          get_furnace_state/0,
+         temperv14_start/1,
          %% Internal late binding
+         temperv14_handle/2,
          handle/2, ping/1, snapshot/1]).
 
 %% Calibration: keep the devices associated to IP addresses, and
@@ -55,27 +57,33 @@ timestamp() ->
     erlang:monotonic_time(second).
 
 %% Thermometer input.
+
+%% Low level UDP messages.
 handle({udp, Socket, {10,1,3,ID}, _, 
         <<255,255,                  %% Magic
-          DAC:16/little-signed>>},  %% 8.8 fixed point celcius
+          ADC:16/little-signed>>},  %% 8.8 fixed point celcius
        #{socket := Socket} = State) when is_number(ID) ->
+    handle({sensor, ID, ADC}, State);
 
+%% Debug case for bad UDP.
+handle({udp, _, _, _, _}=Msg, State) ->
+    io:format("ignoring: ~p~n",[Msg]), State;
+
+%% High level term interface.  ADC values are still raw, so apply
+%% calibration data here.
+handle({sensor, ID, ADC}, State) when is_number(ID) ->
     case maps:find(ID, network()) of
         error ->
             log(State,{unknown, ID}),
             io:format("unknown: ~p~n",[ID]),
             State;
         {ok, {Name, _Desc}} ->
-            DAC0 = maps:get(Name, icepoint(), 0.0),
-            log(State,{dac,Name,DAC}),
-            Temp = (DAC - DAC0) / 256.0,
+            ADC0 = maps:get(Name, icepoint(), 0.0),
+            log(State,{dac,Name,ADC}),
+            Temp = (ADC - ADC0) / 256.0,
             self() ! {temp, Name, Temp},
             State
     end;
-
-%% Debug case for bad UDP.
-handle({udp, _, _, _, _}=Msg, State) ->
-    io:format("ignoring: ~p~n",[Msg]), State;
 
 %% Measurement input with setpoint inactive: pick the first
 %% measurement, so no action is taken at startup.
@@ -239,22 +247,70 @@ network() ->
     #{
        19 => {groom,      <<"Guest Room">>},  %% zora on docking station
     %% 18 => {garage,     <<"Garage">>},      %% pi3
-       45 => {garage,     <<"Garage">>},      %% jacoba
+    %% 45 => {garage,     <<"Garage">>},      %% jacoba
+       98 => {garage,     <<"Garage">>},      %% nexx1
        2  => {zoo,        <<"Dining Room">>},
        12 => {zoe,        <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
        24 => {broom,      <<"Bedroom">>},
        97 => {beaglebone, <<"Basement">>}
      }.
-
-%% ICE point DAC values
+name_to_id(Name) ->
+    Map = maps:from_list([{K,V} || {V,{K,_}} <- maps:to_list(network())]),
+    maps:get(Name, Map).
+%% ICE point ADC values
 -spec icepoint() -> #{ atom() => integer() }.
 icepoint() -> #{
           zoo        => 592, 
           lroom      => 192,
           broom      => 160,
           zoe        => 528,
-          garage     => 656,
+          garage     => 656, %5 nexx1
           groom      => 944,
           beaglebone => 336
       }.
+
+%% Service supervisor for thermometers.
+
+%% What should this do?  This bridges the gaps between what is
+%% expected, and what is there.  In essences it is just a supervisor
+%% that keeps restarting if a sensor is not there.
+
+%% temperv14 sensors are buggy so they should be run under
+%% supervision.  Port programs operate best as query/response, as they
+%% should exit on stdin close.
+
+temperv14_start(N) when is_number(N) ->
+    temperv14_start(tools:format("10.1.1.~p",[N]));
+temperv14_start(A) when is_atom(A) ->
+    temperv14_start(name_to_id(A));
+temperv14_start(Host) ->
+    serv:start_child(
+      {handler,
+       fun() ->
+               log:info("starting temperv14 ~s~n",[Host]),
+               Port = exo:open_ssh_port(Host, "temperv14", [{line,1024}]),
+               temperv14_handle({start, 5000}, #{ port => Port })
+       end,
+       fun thermostat:temperv14_handle/2}).
+temperv14_handle({start,Delay}=Msg, State) ->
+    self() ! read,
+    {ok, TRef} = timer:send_after(Delay, Msg),
+    maps:put(tref, TRef, State);
+temperv14_handle(read, #{ port := Port }=State) ->
+    Port ! {self(), {command, "\n"}},
+    State;
+temperv14_handle({Port,{data,{eol,Bin}}}, #{port:=Port}=State) ->
+    [Dec|_] = re:split(Bin," "),
+    ADC = binary_to_integer(Dec),
+    log:info("C=~p~n", [ADC/256.0]),
+    State;
+temperv14_handle(Msg,State) ->
+    %% log:info("~p~n", [Msg]),
+    obj:handle(Msg,State).
+
+%% On OpenWRT hotplug:
+%% root@nexx1:~# cat /etc/hotplug.d/usb/99-temperv14 
+%% [ $ACTION == add ] && [ $PRODUCT == 'c45/7401/1' ] && chown exo:exo /dev/$DEVNAME
+
+
