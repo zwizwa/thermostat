@@ -1,9 +1,9 @@
 -module(thermostat).
--export([start/0,
+-export([start_link/0,
          network/0, icepoint/0,
          set_furnace_state/1,
          get_furnace_state/0,
-         temperv14_start/1,
+         temperv14_start/2,
          %% Internal late binding
          temperv14_handle/2,
          handle/2, ping/1, snapshot/1]).
@@ -18,7 +18,10 @@
            log    := pid(),
            ping   := pid() }.
                     
-
+start_link() ->
+    Pid = start(),
+    register(thermostat, Pid), 
+    {ok, Pid}.
 start() ->
     serv:start(
       {handler,
@@ -280,17 +283,23 @@ icepoint() -> #{
 %% supervision.  Port programs operate best as query/response, as they
 %% should exit on stdin close.
 
-temperv14_start(N) when is_number(N) ->
-    temperv14_start(tools:format("10.1.1.~p",[N]));
-temperv14_start(A) when is_atom(A) ->
-    temperv14_start(name_to_id(A));
-temperv14_start(Host) ->
+%%temperv14_start(N) when is_number(N) ->
+%%    temperv14_start(tools:format("10.1.1.~p",[N]));
+temperv14_start(Name,DST) when is_atom(Name) ->
+    ID = name_to_id(Name),
+    Host = tools:format("10.1.1.~p",[ID]),
+    temperv14_start({Host,ID},DST);
+
+%% FIXME: monitor the thermostat.
+temperv14_start({Host,ID},Thermostat) ->
     serv:start_child(
       {handler,
        fun() ->
                log:info("starting temperv14 ~s~n",[Host]),
                Port = exo:open_ssh_port(Host, "temperv14", [{line,1024}]),
-               temperv14_handle({start, 5000}, #{ port => Port })
+               temperv14_handle(
+                 {start, 5000},
+                 #{ port => Port, dst => Thermostat, id => ID })
        end,
        fun thermostat:temperv14_handle/2}).
 temperv14_handle({start,Delay}=Msg, State) ->
@@ -300,10 +309,12 @@ temperv14_handle({start,Delay}=Msg, State) ->
 temperv14_handle(read, #{ port := Port }=State) ->
     Port ! {self(), {command, "\n"}},
     State;
-temperv14_handle({Port,{data,{eol,Bin}}}, #{port:=Port}=State) ->
+temperv14_handle({Port,{data,{eol,Bin}}},
+                 #{port:=Port,dst:=Dst,id:=ID}=State) ->
     [Dec|_] = re:split(Bin," "),
     ADC = binary_to_integer(Dec),
-    log:info("C=~p~n", [ADC/256.0]),
+    Dst ! {sensor,ID,ADC},
+    %% log:info("C=~p~n", [ADC/256.0]),
     State;
 temperv14_handle(Msg,State) ->
     %% log:info("~p~n", [Msg]),
