@@ -38,22 +38,23 @@ start() ->
                  socket => Socket, 
                  log => Log,
                  bc => serv:bc_start(),
-                 ping => serv:start({body, fun() -> thermostat:ping(Pid) end})
+                 ping => serv:start({body, fun() -> ?MODULE:ping(Pid) end})
                 },
-               log(State, {start, calendar:local_time()}),
-               log(State, {furnace, get_furnace_state()}),
-               log(State, {network, network()}),
-               log(State, {icepoint, icepoint()}),
+               notify(State, {start, calendar:local_time()}),
+               notify(State, {furnace, get_furnace_state()}),
+               notify(State, {network, network()}),
+               notify(State, {icepoint, icepoint()}),
                State
        end, 
-       fun thermostat:handle/2}).
+       fun ?MODULE:handle/2}).
 
 %% Watchdog: sends a message every minute.  This is used by the server
-%% to shut down the furnace if no readings came in.
+%% to shut down the furnace if no readings came in for the target
+%% sensor.
 ping(Pid) ->
     timer:sleep(60000),
     ok = obj:call(Pid, ping),
-    thermostat:ping(Pid).
+    ?MODULE:ping(Pid).
 
 -spec timestamp() -> integer().
 timestamp() ->
@@ -75,14 +76,14 @@ handle({udp, _, _, _, _}=Msg, State) ->
 %% High level term interface.  ADC values are still raw, so apply
 %% calibration data here.
 handle({sensor, ID, ADC}, State) when is_number(ID) ->
-    case maps:find(ID, network()) of
+    case maps:find(ID, ?MODULE:network()) of
         error ->
-            log(State,{unknown, ID}),
+            notify(State,{unknown, ID}),
             io:format("unknown: ~p~n",[ID]),
             State;
         {ok, {Name, _Desc}} ->
             ADC0 = maps:get(Name, icepoint(), 0.0),
-            log(State,{dac,Name,ADC}),
+            notify(State,{dac,Name,ADC}),
             Temp = (ADC - ADC0) / 256.0,
             self() ! {temp, Name, Temp},
             State
@@ -105,7 +106,7 @@ handle({temp, Name, Temp},
 handle({temp, Name, Temp},
        State = #{target := {Current, _Setpoint}}) ->
 
-    log(State,{temp,Name,Temp}),
+    notify(State,{temp,Name,Temp}),
     
     %% Regulator update if device is current.
     State0 =
@@ -120,39 +121,51 @@ handle({temp, Name, Temp},
                #{ last => Now,
                   {dev, Name} => {Now, Temp} });
 
-%% Check if current thermometer is alive.
+%% Perform a sensor check.
 handle({Pid, ping}, State = #{ target := {Current, _} }) ->
     obj:reply(Pid,ok),
     Now = timestamp(),
-    Check =
-        case maps:find({dev, Current}, State) of
-            {ok, {Time, _Temp}} ->
-                DT = Now - Time,
-                case DT > 60 of 
-                    false -> ok;
-                    true -> {error, {dt, DT}}
-                end;
-            _ ->
-                {error, not_active}
-        end,
-    case Check of
-        ok -> ok;
-        {error, _}=E ->
-            io:format("ping: ~p~n",[{Current,E}]),
-            log(State, {ping, Current, E}),
-            log(State, {furnace, off}),
-            set_furnace_state(off)
-    end,
-    State;
+    TimeoutSec = 60,
+
+    Deltas  = [{D, Now - Last} || {{dev,D},{Last,_Temp}} <- maps:to_list(State)],
+    log:info("ping: deltas: ~p~n", [maps:from_list(Deltas)]),
+    lists:foldl(
+      fun({Name, Delta}, S) ->
+              case Delta > TimeoutSec of
+                  false ->
+                      %% Sensor is ok
+                      S;
+                  true  ->
+                      %% Sensor is bad
+                      %% Propagate to all listeners (e.g. web gui)
+                      notify(State, {remove, Name, {timeout_sec, TimeoutSec}}),
+                      %% As a safety measure, switch off the furnace
+                      %% if the current sensor is not active.  This
+                      %% will lead to a task crash.
+                      case Name of
+                          Current ->
+                              notify(State, {furnace, off}),
+                              set_furnace_state(off),
+                              shutdown;
+                          _ ->
+                              not_current
+                      end,
+                      %% Forget about it.
+                      maps:remove({dev, Name}, State)
+              end
+      end, 
+      State,
+      Deltas);
+
 
 handle({set_target,Current,Setpoint}=Msg, State)
   when is_atom(Current) and is_number(Setpoint) ->
-    log(State, Msg),
+    notify(State, Msg),
     maps:merge(State,
                #{ target => {Current, Setpoint} });
 
 handle({set_spread,Spread}=Msg, State) ->
-    log(State, Msg),
+    notify(State, Msg),
     maps:merge(State,
                #{ spread => Spread });
 
@@ -220,7 +233,7 @@ update(T, off=Old,
 transition(State, _, Old, Old) ->
     State;
 transition(State, T, Old, New) ->
-    log(State, {furnace, New}),
+    notify(State, {furnace, New}),
     set_furnace_state(New),
     io:format("~p: ~p -> ~p~n",[T, Old,New]),
     State.
@@ -234,7 +247,7 @@ get_furnace_state() ->
 set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
 set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").
 
-log(#{log := File, bc := BC}, Term) ->
+notify(#{log := File, bc := BC}, Term) ->
     BC ! {broadcast, {thermostat, Term }},
     file:write(File, io_lib:format("~p~n",[{timestamp(),Term}])).
 
@@ -248,15 +261,13 @@ snapshot(Pid) ->
 -spec network() -> #{ number() => {atom(), binary()} }.
 network() -> 
     #{
-       19 => {groom,      <<"Guest Room">>},  %% zora on docking station
-    %% 18 => {garage,     <<"Garage">>},      %% pi3
-    %% 45 => {garage,     <<"Garage">>},      %% jacoba
+       99 => {groom,      <<"Guest Room">>},  %% nexx0
        98 => {garage,     <<"Garage">>},      %% nexx1
        2  => {zoo,        <<"Dining Room">>},
        12 => {zoe,        <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
        24 => {broom,      <<"Bedroom">>},
-       97 => {beaglebone, <<"Basement">>}
+       89 => {basement,   <<"Basement">>}
      }.
 name_to_id(Name) ->
     Map = maps:from_list([{K,V} || {V,{K,_}} <- maps:to_list(network())]),
@@ -270,7 +281,7 @@ icepoint() -> #{
           zoe        => 528,
           garage     => 656, %5 nexx1
           groom      => 944,
-          beaglebone => 336
+          basement   => 336
       }.
 
 %% Service supervisor for thermometers.
@@ -282,6 +293,8 @@ icepoint() -> #{
 %% temperv14 sensors are buggy so they should be run under
 %% supervision.  Port programs operate best as query/response, as they
 %% should exit on stdin close.
+
+%% FIXME: This needs to be gentler.
 
 %%temperv14_start(N) when is_number(N) ->
 %%    temperv14_start(tools:format("10.1.1.~p",[N]));
@@ -295,20 +308,32 @@ temperv14_start({Host,ID},Thermostat) ->
     serv:start_child(
       {handler,
        fun() ->
-               log:info("starting temperv14 ~s~n",[Host]),
-               Port = exo:open_ssh_port(Host, "temperv14", [{line,1024}]),
+               log:set_info_name({temperv14,{Host,ID}}),
+               log:info("starting sensor monitor~n",[Host]),
+               _Ref = erlang:monitor(process, Thermostat),
                temperv14_handle(
-                 {start, 5000},
-                 #{ port => Port, dst => Thermostat, id => ID })
+                 connect, 
+                 #{ dst  => Thermostat, 
+                    host => Host,
+                    id   => ID })
        end,
-       fun thermostat:temperv14_handle/2}).
+       fun ?MODULE:temperv14_handle/2}).
+
+temperv14_handle(_Msg=connect,
+                 #{host := Host}=State) ->
+    Port = exo:open_ssh_port(Host, "temperv14", [{line, 1024}]),
+    State1 = maps:put(port, Port, State),
+    temperv14_handle({start, 5000}, State1);
+
 temperv14_handle({start,Delay}=Msg, State) ->
     self() ! read,
     {ok, TRef} = timer:send_after(Delay, Msg),
     maps:put(tref, TRef, State);
+
 temperv14_handle(read, #{ port := Port }=State) ->
     Port ! {self(), {command, "\n"}},
     State;
+
 temperv14_handle({Port,{data,{eol,Bin}}},
                  #{port:=Port,dst:=Dst,id:=ID}=State) ->
     [Dec|_] = re:split(Bin," "),
@@ -316,6 +341,14 @@ temperv14_handle({Port,{data,{eol,Bin}}},
     Dst ! {sensor,ID,ADC},
     %% log:info("C=~p~n", [ADC/256.0]),
     State;
+
+temperv14_handle(_Msg={Port,{exit_status,_}},
+                 #{port:=Port,id:=_ID}=State) ->
+    log:info("temperv14: ~p~n", [{_ID,_Msg}]),
+    %% We handle sensor poop-outs here.
+    timer:sleep(5000),
+    temperv14_handle(connect, State);
+
 temperv14_handle(Msg,State) ->
     %% log:info("~p~n", [Msg]),
     obj:handle(Msg,State).
