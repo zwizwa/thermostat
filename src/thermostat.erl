@@ -5,6 +5,7 @@
          get_furnace_state/0,
          temperv14_start/2,
          %% Internal late binding
+         recorder/0,
          temperv14_handle/2,
          handle/2, ping/1, snapshot/1]).
 
@@ -28,7 +29,7 @@ start() ->
        fun () ->
                Pid = self(), 
                {ok, Socket} = gen_udp:open(2001,[binary]),
-               {ok, Log} = file:open("/var/log/thermostat", [append, delayed_write]),
+               %% {ok, Log} = file:open("/var/log/thermostat", [append, delayed_write]),
                State = #{
                  %% Controller Config
                  target => {lroom, undefined},
@@ -36,7 +37,8 @@ start() ->
                  
                  %% Infrastructure
                  socket => Socket, 
-                 log => Log,
+                 %% log => Log,
+                 recorder => recorder(),
                  bc => serv:bc_start(),
                  ping => serv:start({body, fun() -> ?MODULE:ping(Pid) end})
                 },
@@ -75,7 +77,7 @@ handle({udp, _, _, _, _}=Msg, State) ->
 
 %% High level term interface.  ADC values are still raw, so apply
 %% calibration data here.
-handle({sensor, ID, ADC}, State) when is_number(ID) ->
+handle({sensor, ID, ADC}=_Msg, State) when is_number(ID) ->
     case maps:find(ID, ?MODULE:network()) of
         error ->
             notify(State,{unknown, ID}),
@@ -91,8 +93,9 @@ handle({sensor, ID, ADC}, State) when is_number(ID) ->
 
 %% Measurement input with setpoint inactive: pick the first
 %% measurement, so no action is taken at startup.
-handle({temp, Name, Temp},
+handle({temp, Name, Temp}=_Msg,
        State = #{target := {Current, undefined}}) ->
+    %% log:info("1: ~p~n",[_Msg]),
     case Name of
         Current ->
             NewTarget = {Current, Temp},
@@ -103,9 +106,10 @@ handle({temp, Name, Temp},
     end;
 
 %% Measurement input with setpoint active.
-handle({temp, Name, Temp},
+handle({temp, Name, Temp}=_Msg,
        State = #{target := {Current, _Setpoint}}) ->
 
+    %% log:info("2: ~p~n",[_Msg]),
     notify(State,{temp,Name,Temp}),
     
     %% Regulator update if device is current.
@@ -128,7 +132,7 @@ handle({Pid, ping}, State = #{ target := {Current, _} }) ->
     TimeoutSec = 60,
 
     Deltas  = [{D, Now - Last} || {{dev,D},{Last,_Temp}} <- maps:to_list(State)],
-    log:info("ping: deltas: ~p~n", [maps:from_list(Deltas)]),
+    %% log:info("ping: deltas: ~p~n", [maps:from_list(Deltas)]),
     lists:foldl(
       fun({Name, Delta}, S) ->
               case Delta > TimeoutSec of
@@ -193,7 +197,7 @@ handle({Pid,snapshot},State) ->
           %% Remove internal bits
           lists:foldl(
             fun(F,S) -> F(S) end, State,
-            [fun(M) -> maps:remove(K,M) end || K <- [socket, ping, log]]),
+            [fun(M) -> maps:remove(K,M) end || K <- [socket, ping, recorder]]),
           %% This has to run on the actuator host, which is the main
           %% reason why snapshot is implemented as rpc method.
           #{ furnace => get_furnace_state() }),
@@ -247,9 +251,12 @@ get_furnace_state() ->
 set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
 set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").
 
-notify(#{log := File, bc := BC}, Term) ->
+notify(#{recorder := Recorder, bc := BC}, Term) ->
     BC ! {broadcast, {thermostat, Term }},
-    file:write(File, io_lib:format("~p~n",[{timestamp(),Term}])).
+    Recorder ! Term,
+    %% Old style text file.  Obsolete.
+    %%file:write(File, io_lib:format("~p~n",[{timestamp(),Term}])).
+    ok.
 
 
 %% User access
@@ -261,26 +268,27 @@ snapshot(Pid) ->
 -spec network() -> #{ number() => {atom(), binary()} }.
 network() -> 
     #{
-       99 => {groom,      <<"Guest Room">>},  %% nexx0
+       24 => {groom,      <<"Guest Room">>},  %% nexx0
        98 => {garage,     <<"Garage">>},      %% nexx1
        2  => {zoo,        <<"Dining Room">>},
        12 => {zoe,        <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
-       24 => {broom,      <<"Bedroom">>},
+       99 => {broom,      <<"Bedroom">>},
        89 => {basement,   <<"Basement">>}
      }.
 name_to_id(Name) ->
     Map = maps:from_list([{K,V} || {V,{K,_}} <- maps:to_list(network())]),
     maps:get(Name, Map).
+
 %% ICE point ADC values
 -spec icepoint() -> #{ atom() => integer() }.
 icepoint() -> #{
           zoo        => 592, 
           lroom      => 192,
           broom      => 160,
-          zoe        => 528,
-          garage     => 656, %5 nexx1
           groom      => 944,
+          zoe        => 528,
+          garage     => 656, %% nexx1
           basement   => 336
       }.
 
@@ -358,3 +366,12 @@ temperv14_handle(Msg,State) ->
 %% [ $ACTION == add ] && [ $PRODUCT == 'c45/7401/1' ] && chown exo:exo /dev/$DEVNAME
 
 
+
+
+recorder() ->
+    {ok, Pid} = 
+        recorder:start_link(
+          #{ dir => "/var/log/thermostat.d/",
+             nb_chunks => 400,
+             chunk_size => 10*1000*1000 }),
+    Pid.
