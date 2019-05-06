@@ -372,6 +372,6 @@ recorder() ->
     {ok, Pid} = 
         recorder:start_link(
           #{ dir => "/var/log/thermostat.d/",
-             nb_chunks => 400,
+             usage => {nb_chunks, 400},
              chunk_size => 10*1000*1000 }),
     Pid.
