@@ -312,10 +312,11 @@ temperv14_start(Name,DST) when is_atom(Name) ->
     temperv14_start({Host,ID},DST);
 
 %% FIXME: monitor the thermostat.
-temperv14_start({Host,ID},Thermostat) ->
+temperv14_start({Host,ID},Find) ->
     serv:start_child(
       {handler,
        fun() ->
+               Thermostat = Find(thermostat),
                log:set_info_name({temperv14,{Host,ID}}),
                log:info("starting sensor monitor~n",[Host]),
                _Ref = erlang:monitor(process, Thermostat),
