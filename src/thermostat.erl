@@ -244,10 +244,16 @@ transition(State, T, Old, New) ->
 
 %% Always use actual pin state.  Don't duplicate states.
 get_furnace_state() ->
-    case os:cmd("/usr/local/bin/furnace.sh state") of
-        "off\n" -> off;
-        "on\n" -> on
+    try
+        case os:cmd("/usr/local/bin/furnace.sh state") of
+            "off\n" -> off;
+            "on\n" -> on
+        end
+    catch C:E ->
+            %% log:info("WARNING: get_furnace_state: ~p~n", [{C,E}]),
+            off
     end.
+
 set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
 set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").
 
@@ -271,7 +277,7 @@ network() ->
        24 => {groom,      <<"Guest Room">>},  %% nexx0
        98 => {garage,     <<"Garage">>},      %% nexx1
        2  => {zoo,        <<"Dining Room">>},
-       12 => {zoe,        <<"Tom Office">>},
+       20 => {roza,       <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
        99 => {broom,      <<"Bedroom">>},
        89 => {basement,   <<"Basement">>}
@@ -330,7 +336,12 @@ temperv14_start({Host,ID},Find) ->
 
 temperv14_handle(_Msg=connect,
                  #{host := Host}=State) ->
-    Port = exo:open_ssh_port(Host, "temperv14", [{line, 1024}]),
+    %% FIXME: Let the supervisor that starts us pass in the correct
+    %% environment, and use tools:spawn_port here.
+    Port = exo_port:spawn_port(
+             #{ host => Host },
+             {"temperv14",[]},
+             [use_stdio, binary, exit_status, {line, 1024}]),
     State1 = maps:put(port, Port, State),
     temperv14_handle({start, 5000}, State1);
 
@@ -343,8 +354,9 @@ temperv14_handle(read, #{ port := Port }=State) ->
     Port ! {self(), {command, "\n"}},
     State;
 
-temperv14_handle({Port,{data,{eol,Bin}}},
+temperv14_handle(_Msg={Port,{data,{eol,Bin}}},
                  #{port:=Port,dst:=Dst,id:=ID}=State) ->
+    %% log:info("~p~n",[_Msg]),
     [Dec|_] = re:split(Bin," "),
     ADC = binary_to_integer(Dec),
     Dst ! {sensor,ID,ADC},
