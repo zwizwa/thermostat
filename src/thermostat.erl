@@ -1,9 +1,9 @@
 -module(thermostat).
 -export([start_link/0,
          network/0, icepoint/0,
-         set_furnace_state/1,
-         get_furnace_state/0,
          temperv14_start/2,
+         start_furnace_link/0,
+         furnace_handle/2,
          %% Internal late binding
          recorder/0,
          temperv14_handle/2,
@@ -30,20 +30,22 @@ start() ->
                Pid = self(), 
                {ok, Socket} = gen_udp:open(2001,[binary]),
                %% {ok, Log} = file:open("/var/log/thermostat", [append, delayed_write]),
+               {ok, Furnace} = start_furnace_link(),
                State = #{
                  %% Controller Config
                  target => {lroom, undefined},
                  spread => 0.5,
                  
                  %% Infrastructure
-                 socket => Socket, 
+                 socket => Socket,
+                 furnace => Furnace,
                  %% log => Log,
                  recorder => recorder(),
                  bc => serv:bc_start(),
                  ping => serv:start({body, fun() -> ?MODULE:ping(Pid) end})
                 },
                notify(State, {start, calendar:local_time()}),
-               notify(State, {furnace, get_furnace_state()}),
+               notify(State, {furnace, get_furnace_state(Furnace)}),
                notify(State, {network, network()}),
                notify(State, {icepoint, icepoint()}),
                State
@@ -107,7 +109,8 @@ handle({temp, Name, Temp}=_Msg,
 
 %% Measurement input with setpoint active.
 handle({temp, Name, Temp}=_Msg,
-       State = #{target := {Current, _Setpoint}}) ->
+       State = #{furnace := Furnace,
+                 target := {Current, _Setpoint}}) ->
 
     %% log:info("2: ~p~n",[_Msg]),
     notify(State,{temp,Name,Temp}),
@@ -115,7 +118,7 @@ handle({temp, Name, Temp}=_Msg,
     %% Regulator update if device is current.
     State0 =
         case Name of
-            Current -> update(Temp, get_furnace_state(), State);
+            Current -> update(Temp, get_furnace_state(Furnace), State);
             _  -> State
         end,
     
@@ -126,7 +129,7 @@ handle({temp, Name, Temp}=_Msg,
                   {dev, Name} => {Now, Temp} });
 
 %% Perform a sensor check.
-handle({Pid, ping}, State = #{ target := {Current, _} }) ->
+handle({Pid, ping}, State = #{ furnace := Furnace, target := {Current, _} }) ->
     obj:reply(Pid,ok),
     Now = timestamp(),
     TimeoutSec = 60,
@@ -149,7 +152,7 @@ handle({Pid, ping}, State = #{ target := {Current, _} }) ->
                       case Name of
                           Current ->
                               notify(State, {furnace, off}),
-                              set_furnace_state(off),
+                              set_furnace_state(Furnace, off),
                               shutdown;
                           _ ->
                               not_current
@@ -190,7 +193,7 @@ handle({set_spread,Spread}=Msg, State) ->
 %%                  temps   => Temps }),
 %%     State;
 
-handle({Pid,snapshot},State) ->
+handle({Pid,snapshot},State = #{ furnace := Furnace }) ->
     %% Remove internal bits.
     Snapshot =
         maps:merge(
@@ -200,7 +203,7 @@ handle({Pid,snapshot},State) ->
             [fun(M) -> maps:remove(K,M) end || K <- [socket, ping, recorder]]),
           %% This has to run on the actuator host, which is the main
           %% reason why snapshot is implemented as rpc method.
-          #{ furnace => get_furnace_state() }),
+          #{ furnace => get_furnace_state(Furnace) }),
 
     %% Record furnace state
     obj:reply(Pid, Snapshot),
@@ -236,26 +239,31 @@ update(T, off=Old,
 %% Furnace control
 transition(State, _, Old, Old) ->
     State;
-transition(State, T, Old, New) ->
+transition(State = #{ furnace := Furnace}, 
+           T, Old, New) ->
     notify(State, {furnace, New}),
-    set_furnace_state(New),
+    set_furnace_state(Furnace, New),
     io:format("~p: ~p -> ~p~n",[T, Old,New]),
     State.
 
 %% Always use actual pin state.  Don't duplicate states.
-get_furnace_state() ->
-    try
-        case os:cmd("/usr/local/bin/furnace.sh state") of
-            "off\n" -> off;
-            "on\n" -> on
-        end
-    catch C:E ->
-            %% log:info("WARNING: get_furnace_state: ~p~n", [{C,E}]),
-            off
-    end.
 
-set_furnace_state(on)  -> os:cmd("/usr/local/bin/furnace.sh on");
-set_furnace_state(off) -> os:cmd("/usr/local/bin/furnace.sh off").
+%% -define(FURNACE_SH, "ssh 10.1.3.89 /usr/local/bin/furnace.sh").
+%% get_furnace_state() ->
+%%     try
+%%         case os:cmd(?FURNACE_SH " state") of
+%%             "off\n" -> off;
+%%             "on\n" -> on
+%%         end
+%%     catch C:E ->
+%%             log:info("WARNING: get_furnace_state: ~p~n", [{C,E}]),
+%%             off
+%%     end.
+%% set_furnace_state(on)  -> os:cmd(?FURNACE_SH " on");
+%% set_furnace_state(off) -> os:cmd(?FURNACE_SH " off").
+
+
+
 
 notify(#{recorder := Recorder, bc := BC}, Term) ->
     BC ! {broadcast, {thermostat, Term }},
@@ -388,3 +396,53 @@ recorder() ->
              usage => {nb_chunks, 400},
              chunk_size => 10*1000*1000 }),
     Pid.
+
+
+%% Allow the furnace control to be separate from the host that runs
+%% the thermostat logic.  Abstract it in an Erlang process.
+start_furnace_link() ->
+    {ok,
+     serv:start(
+       {handler,
+        fun() -> #{
+             port => exo_port:spawn_port(
+                       #{ host => colibri,
+                          user => tom },
+                       {"furnace",[]},
+                       [use_stdio, binary, exit_status,{line,1024}])
+            }
+        end,
+        fun ?MODULE:furnace_handle/2})}.
+furnace_handle(Msg, State = #{port := Port}) ->
+    case Msg of
+        {Pid, on} ->
+            port_command(Port, <<"on\n">>),
+            furnace_handle({Pid, state}, State);
+        {Pid, off} ->
+            port_command(Port, <<"off\n">>),
+            furnace_handle({Pid, state}, State);
+        {Pid, state} ->
+            port_command(Port, <<"state\n">>),
+            receive
+                {Port,{data,{eol,<<"off">>}}} -> obj:reply(Pid, off);
+                {Port,{data,{eol,<<"on">>}}} -> obj:reply(Pid, on)
+            after 5000 -> throw({furnace_handle, timeout}) end,
+            State;
+        {_Pid, dump} ->
+            obj:handle(Msg, State);
+        _ ->
+            exit({furnace_handle,Msg})
+    end.
+get_furnace_state(Furnace) ->
+    %% FIXME: This is sometimes very slow: .5 to 1.0 seconds.
+    {_DT,S} = timer:tc(fun() -> obj:call(Furnace, state) end),
+    %% log:info("get_furnace_state: ~p~n", [{_DT,S}]),
+    S.
+
+
+set_furnace_state(Furnace, State) ->
+    obj:call(Furnace, State).
+
+
+    
+
