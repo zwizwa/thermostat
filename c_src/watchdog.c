@@ -39,6 +39,7 @@ void state(void) {
     FILE *f;
     ASSERT(f = fopen(gpio, "r"));
     ASSERT(1 == fread(&s, 1, 1, f));
+    fclose(f);
     printf("%s\n", !!(s-'0') ? "on" : "off");
     fflush(stdout);
 }
