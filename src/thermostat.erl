@@ -285,7 +285,7 @@ network() ->
        24 => {groom,      <<"Guest Room">>},  %% nexx0
        98 => {garage,     <<"Garage">>},      %% nexx1
        2  => {zoo,        <<"Dining Room">>},
-       20 => {roza,       <<"Tom Office">>},
+       12 => {zoe,        <<"Tom Office">>},
        23 => {lroom,      <<"Living Room">>},
        99 => {broom,      <<"Bedroom">>},
        89 => {basement,   <<"Basement">>}
